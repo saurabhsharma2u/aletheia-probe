@@ -763,6 +763,8 @@ class QueryDispatcher:
                         config_params["cache_ttl_hours"] = backend_config.config[
                             "cache_ttl_hours"
                         ]
+                    if "api_key" in backend_config.config:
+                        config_params["api_key"] = backend_config.config["api_key"]
 
                 # Apply global TTL override (e.g. set by mass-eval for multi-day runs)
                 if self._cache_ttl_hours_override is not None:

@@ -44,24 +44,57 @@ BONUS_CONF_GOOD = 0.05
 BONUS_CONF_LONG_RUNNING = 0.1
 
 
+def _get_configured_openalex_api_key() -> str | None:
+    """Return OpenAlex API key from environment or backend config."""
+    env_api_key = os.environ.get("OPENALEX_API_KEY")
+    if env_api_key:
+        return env_api_key
+
+    try:
+        from .config import get_config_manager  # noqa: PLC0415
+
+        backend_config = get_config_manager().get_backend_config("openalex_analyzer")
+        if backend_config:
+            api_key = backend_config.config.get("api_key")
+            if isinstance(api_key, str) and api_key:
+                return api_key
+    except Exception as exc:  # noqa: BLE001 - config is optional for library use
+        detail_logger.debug(f"Could not load OpenAlex API key from config: {exc}")
+
+    return None
+
+
 class OpenAlexClient:
     """Client for OpenAlex API to fetch journal publication statistics."""
 
     BASE_URL = "https://api.openalex.org"
 
     def __init__(
-        self, email: str = "noreply@aletheia-probe.org", max_concurrent: int = 10
+        self,
+        email: str = "noreply@aletheia-probe.org",
+        api_key: str | None = None,
+        max_concurrent: int = 10,
     ):
         """Initialize OpenAlex client.
 
         Args:
-            email: Email for polite pool access (recommended for higher rate limits)
+            email: Email for API request identification
+            api_key: OpenAlex API key for authenticated usage limits
             max_concurrent: Maximum concurrent API requests
         """
         self.email = email
+        self.api_key = api_key or os.environ.get("OPENALEX_API_KEY")
         self.headers = {"User-Agent": f"AletheiaProbe/1.0 (mailto:{email})"}
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.session: aiohttp.ClientSession | None = None
+
+    def _with_auth_params(
+        self, params: dict[str, str | int]
+    ) -> dict[str, str | int]:
+        """Return request params with OpenAlex authentication when configured."""
+        if not self.api_key:
+            return params
+        return {**params, "api_key": self.api_key}
 
     async def __aenter__(self) -> "OpenAlexClient":
         """Async context manager entry."""
@@ -94,7 +127,7 @@ class OpenAlexClient:
         """
         async with self.semaphore:
             url = f"{self.BASE_URL}/sources"
-            params = {"filter": f"issn:{issn}"}
+            params = self._with_auth_params({"filter": f"issn:{issn}"})
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -222,10 +255,12 @@ class OpenAlexClient:
         async with self.semaphore:
             capped_per_page = max(1, min(per_page, 50))
             url = f"{self.BASE_URL}/sources"
-            params: dict[str, str | int] = {
-                "search": journal_name,
-                "per-page": capped_per_page,
-            }
+            params = self._with_auth_params(
+                {
+                    "search": journal_name,
+                    "per-page": capped_per_page,
+                }
+            )
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -273,7 +308,7 @@ class OpenAlexClient:
         async with self.semaphore:
             # Use search endpoint for fuzzy matching
             url = f"{self.BASE_URL}/sources"
-            params = {"search": journal_name}
+            params = self._with_auth_params({"search": journal_name})
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -362,14 +397,16 @@ class OpenAlexClient:
                 source_id = f"S{source_id}"
 
             url = f"{self.BASE_URL}/works"
-            params: dict[str, str | int] = {
-                "filter": (
-                    f"primary_location.source.id:https://openalex.org/{source_id},"
-                    f"publication_year:{start_year}-{end_year}"
-                ),
-                "group_by": "publication_year",
-                "per-page": 200,
-            }
+            params = self._with_auth_params(
+                {
+                    "filter": (
+                        f"primary_location.source.id:https://openalex.org/{source_id},"
+                        f"publication_year:{start_year}-{end_year}"
+                    ),
+                    "group_by": "publication_year",
+                    "per-page": 200,
+                }
+            )
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -508,7 +545,9 @@ class OpenAlexClient:
 
 
 def create_openalex_client(
-    email: str = "noreply@aletheia-probe.org", **kwargs: Any
+    email: str = "noreply@aletheia-probe.org",
+    api_key: str | None = None,
+    **kwargs: Any,
 ) -> "OpenAlexClient":
     """Factory that returns an OpenAlexClient or a LocalOpenAlexAdapter.
 
@@ -518,7 +557,8 @@ def create_openalex_client(
     aletheia-probe: the import happens lazily at runtime and only when needed.
 
     Args:
-        email: Email for OpenAlex polite pool access (used only in remote mode).
+        email: Email for OpenAlex API request identification (remote mode only).
+        api_key: OpenAlex API key for authenticated usage limits (remote mode only).
         **kwargs: Additional keyword arguments forwarded to ``OpenAlexClient``.
 
     Returns:
@@ -541,7 +581,10 @@ def create_openalex_client(
                 "  pip install 'git+https://github.com/sustainet-guardian/"
                 "aletheia-probe-openalex-platform.git#subdirectory=adapter'"
             ) from exc
-    return OpenAlexClient(email=email, **kwargs)
+    resolved_api_key = (
+        api_key if api_key is not None else _get_configured_openalex_api_key()
+    )
+    return OpenAlexClient(email=email, api_key=resolved_api_key, **kwargs)
 
 
 # Convenience function for one-off enrichment

@@ -55,6 +55,22 @@ class TestBackendEmailConfiguration:
         assert backend.cache_ttl_hours == 8
         assert backend.get_name() == "openalex_analyzer"
 
+    def test_backend_registry_create_backend_with_openalex_api_key(self):
+        """Test that openalex_analyzer backend can be created with an API key."""
+        registry = get_backend_registry()
+
+        backend = registry.create_backend(
+            "openalex_analyzer",
+            email="issue47-openalex@example.com",
+            cache_ttl_hours=8,
+            api_key="openalex-test-key",
+        )
+
+        assert backend.email == "issue47-openalex@example.com"
+        assert backend.cache_ttl_hours == 8
+        assert backend.api_key == "openalex-test-key"
+        assert backend.get_name() == "openalex_analyzer"
+
     def test_config_file_email_configuration(self):
         """Test that email configuration can be loaded from a config file.
 
@@ -107,6 +123,18 @@ backends:
 
         backend = registry.create_backend("openalex_analyzer", **config_params)
         assert backend.email == "original-error-test@example.com"
+
+    def test_openalex_api_key_parameter_merging_with_defaults(self):
+        """Test OpenAlex API key parameters merge with default configuration."""
+        registry = get_backend_registry()
+
+        backend = registry.create_backend(
+            "openalex_analyzer", api_key="openalex-merge-key"
+        )
+
+        assert backend.email == "noreply@aletheia-probe.org"
+        assert backend.cache_ttl_hours == 24
+        assert backend.api_key == "openalex-merge-key"
 
     def test_email_parameter_merging_with_defaults(self):
         """Test that email parameters are properly merged with default configuration."""

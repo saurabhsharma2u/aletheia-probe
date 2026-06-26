@@ -529,6 +529,42 @@ class TestQueryDispatcher:
                 "crossref_analyzer", email="test@example.com"
             )
 
+    def test_get_enabled_backends_with_openalex_api_key_config(self, dispatcher):
+        """Test getting OpenAlex backend with API key configuration."""
+        with (
+            patch.object(
+                dispatcher.config_manager,
+                "get_enabled_backends",
+                return_value=["openalex_analyzer"],
+            ),
+            patch.object(
+                dispatcher.config_manager, "get_backend_config"
+            ) as mock_get_backend_config,
+            patch(
+                "aletheia_probe.dispatcher.get_backend_registry"
+            ) as mock_get_registry,
+        ):
+            mock_backend_config = Mock()
+            mock_backend_config.email = "test@example.com"
+            mock_backend_config.config = {"api_key": "openalex-api-key"}
+            mock_get_backend_config.return_value = mock_backend_config
+
+            mock_backend = Mock()
+            mock_backend.get_name.return_value = "openalex_analyzer"
+            mock_registry = Mock()
+            mock_registry.create_backend.return_value = mock_backend
+            mock_get_registry.return_value = mock_registry
+
+            backends = dispatcher._get_enabled_backends()
+
+            assert len(backends) == 1
+            assert mock_backend in backends
+            mock_registry.create_backend.assert_called_once_with(
+                "openalex_analyzer",
+                email="test@example.com",
+                api_key="openalex-api-key",
+            )
+
     def test_get_enabled_backends_without_email_config(self, dispatcher):
         """Test getting enabled backends without email configuration."""
         with (

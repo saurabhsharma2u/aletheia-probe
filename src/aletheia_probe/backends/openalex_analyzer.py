@@ -29,13 +29,17 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
     """Backend that analyzes OpenAlex data patterns to assess journal legitimacy."""
 
     def __init__(
-        self, email: str = "noreply@aletheia-probe.org", cache_ttl_hours: int = 24
+        self,
+        email: str = "noreply@aletheia-probe.org",
+        cache_ttl_hours: int = 24,
+        api_key: str | None = None,
     ):
         """Initialize OpenAlex analyzer backend.
 
         Args:
-            email: Email for OpenAlex polite pool access
+            email: Email for OpenAlex API request identification
             cache_ttl_hours: Cache TTL in hours
+            api_key: OpenAlex API key for authenticated usage limits
 
         Raises:
             TypeError: If email is not a string
@@ -43,6 +47,7 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
         """
         super().__init__(cache_ttl_hours)
         self.email = validate_email(email)
+        self.api_key = api_key
         self.detail_logger = get_detail_logger()
 
     def get_name(self) -> str:
@@ -91,7 +96,9 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
             OpenAlex data if found, None if no match
         """
         self.detail_logger.debug(f"OpenAlex: Searching by ISSN {issn}")
-        async with create_openalex_client(email=self.email) as client:
+        async with create_openalex_client(
+            email=self.email, api_key=self.api_key
+        ) as client:
             # OpenAlex client requires journal_name, so use empty string for ISSN-only searches
             return await client.enrich_journal_data(
                 journal_name="", issn=issn, eissn=None
@@ -110,7 +117,9 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
             OpenAlex data if found, None if no match
         """
         self.detail_logger.debug(f"OpenAlex: Searching by name '{name}'")
-        async with create_openalex_client(email=self.email) as client:
+        async with create_openalex_client(
+            email=self.email, api_key=self.api_key
+        ) as client:
             return await client.enrich_journal_data(
                 journal_name=name, issn=None, eissn=None
             )
@@ -861,8 +870,14 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
 # Register the backend with factory for configuration support
 get_backend_registry().register_factory(
     "openalex_analyzer",
-    lambda email="noreply@aletheia-probe.org", cache_ttl_hours=24: (
-        OpenAlexAnalyzerBackend(email=email, cache_ttl_hours=cache_ttl_hours)
+    lambda email="noreply@aletheia-probe.org", cache_ttl_hours=24, api_key=None: (
+        OpenAlexAnalyzerBackend(
+            email=email, cache_ttl_hours=cache_ttl_hours, api_key=api_key
+        )
     ),
-    default_config={"email": "noreply@aletheia-probe.org", "cache_ttl_hours": 24},
+    default_config={
+        "email": "noreply@aletheia-probe.org",
+        "cache_ttl_hours": 24,
+        "api_key": None,
+    },
 )

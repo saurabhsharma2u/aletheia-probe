@@ -58,6 +58,29 @@ class TestOpenAlexClient:
             )
 
     @pytest.mark.asyncio
+    async def test_requests_include_api_key_when_configured(self):
+        """Test OpenAlex requests include configured API keys."""
+        mock_response_data = {"results": []}
+
+        with patch("aiohttp.ClientSession.get") as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value=mock_response_data)
+            mock_get.return_value.__aenter__.return_value = mock_response
+
+            async with OpenAlexClient(api_key="test-openalex-key") as client:
+                result = await client.get_source_by_issn("0028-0836")
+
+            assert result is None
+            mock_get.assert_called_once_with(
+                "https://api.openalex.org/sources",
+                params={
+                    "filter": "issn:0028-0836",
+                    "api_key": "test-openalex-key",
+                },
+            )
+
+    @pytest.mark.asyncio
     async def test_get_source_by_issn_not_found(self):
         """Test getting source by ISSN when not found."""
         mock_response_data: dict[str, list] = {"results": []}
@@ -380,6 +403,42 @@ class TestCreateOpenAlexClientFactory:
         client = create_openalex_client(email="test@example.com")
         assert isinstance(client, OpenAlexClient)
         assert client.email == "test@example.com"
+
+    def test_remote_mode_forwards_api_key(self, monkeypatch):
+        """Default remote mode forwards API keys to the OpenAlex client."""
+        monkeypatch.delenv("OPENALEX_MODE", raising=False)
+        client = create_openalex_client(api_key="factory-key")
+        assert isinstance(client, OpenAlexClient)
+        assert client.api_key == "factory-key"
+
+    def test_remote_mode_reads_api_key_from_environment(self, monkeypatch):
+        """Default remote mode can read API keys from OPENALEX_API_KEY."""
+        monkeypatch.delenv("OPENALEX_MODE", raising=False)
+        monkeypatch.setenv("OPENALEX_API_KEY", "env-key")
+        client = create_openalex_client()
+        assert isinstance(client, OpenAlexClient)
+        assert client.api_key == "env-key"
+
+    def test_remote_mode_reads_api_key_from_config(self, monkeypatch):
+        """Default remote mode can read API keys from backend config."""
+        monkeypatch.delenv("OPENALEX_MODE", raising=False)
+        monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+        mock_backend_config = Mock()
+        mock_backend_config.config = {"api_key": "config-key"}
+        mock_config_manager = Mock()
+        mock_config_manager.get_backend_config.return_value = mock_backend_config
+
+        with patch(
+            "aletheia_probe.config.get_config_manager",
+            return_value=mock_config_manager,
+        ):
+            client = create_openalex_client()
+
+        assert isinstance(client, OpenAlexClient)
+        assert client.api_key == "config-key"
+        mock_config_manager.get_backend_config.assert_called_once_with(
+            "openalex_analyzer"
+        )
 
     def test_explicit_remote_mode_returns_openalex_client(self, monkeypatch):
         """OPENALEX_MODE=remote explicitly returns an OpenAlexClient."""

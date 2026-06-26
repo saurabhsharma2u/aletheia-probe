@@ -85,6 +85,8 @@ backends:
   openalex_analyzer:
     enabled: true
     email: "your.email@institution.org"  # Your contact email
+    config:
+      api_key: "your_openalex_api_key"   # Optional; no username is needed
 
   cross_validator:
     enabled: true
@@ -101,6 +103,7 @@ backends:
 - The same email can be used for all backends
 - Email is sent in the User-Agent header as `AletheiaProbe/1.0 (mailto:your.email@institution.org)`
 - No emails are sent to this address - it's purely for identification
+- OpenAlex authentication uses only the API key. The account/user identity is tied to the key server-side, so no username is sent.
 - In shared or public setups, consider using a dedicated service email rather than personal addresses
 - Additional parameters like `cache_ttl_hours` can be configured in the `config` section
 - Email format is validated - invalid emails will cause configuration errors
@@ -492,6 +495,7 @@ export JOURNAL_ASSESS_BEALLS_ENABLED="false"
 
 # Optional local snapshot modes (no core dependency changes required)
 export OPENALEX_MODE="remote"          # or "local"
+export OPENALEX_API_KEY="your_openalex_api_key"  # Optional remote API auth
 export OPENCITATIONS_MODE="remote"     # or "local"
 
 # OpenCitations local adapter settings (only when OPENCITATIONS_MODE=local)
