@@ -93,7 +93,8 @@ class OpenAlexClient:
             Dictionary with source information or None if not found
         """
         async with self.semaphore:
-            url = f"{self.BASE_URL}/sources?filter=issn:{issn}"
+            url = f"{self.BASE_URL}/sources"
+            params = {"filter": f"issn:{issn}"}
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -102,7 +103,7 @@ class OpenAlexClient:
                     trust_env=True,
                 )
 
-            async with self.session.get(url) as response:
+            async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     results = data.get("results", [])
@@ -220,10 +221,11 @@ class OpenAlexClient:
         """
         async with self.semaphore:
             capped_per_page = max(1, min(per_page, 50))
-            url = (
-                f"{self.BASE_URL}/sources?search={journal_name}"
-                f"&per-page={capped_per_page}"
-            )
+            url = f"{self.BASE_URL}/sources"
+            params: dict[str, str | int] = {
+                "search": journal_name,
+                "per-page": capped_per_page,
+            }
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -232,7 +234,7 @@ class OpenAlexClient:
                     trust_env=True,
                 )
 
-            async with self.session.get(url) as response:
+            async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     results = data.get("results", [])
@@ -270,7 +272,8 @@ class OpenAlexClient:
         """
         async with self.semaphore:
             # Use search endpoint for fuzzy matching
-            url = f"{self.BASE_URL}/sources?search={journal_name}"
+            url = f"{self.BASE_URL}/sources"
+            params = {"search": journal_name}
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -279,7 +282,7 @@ class OpenAlexClient:
                     trust_env=True,
                 )
 
-            async with self.session.get(url) as response:
+            async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     results = data.get("results", [])
@@ -358,12 +361,15 @@ class OpenAlexClient:
             if not source_id.startswith("S"):
                 source_id = f"S{source_id}"
 
-            url = (
-                f"{self.BASE_URL}/works?"
-                f"filter=primary_location.source.id:https://openalex.org/{source_id},"
-                f"publication_year:{start_year}-{end_year}&"
-                f"group_by=publication_year&per-page=200"
-            )
+            url = f"{self.BASE_URL}/works"
+            params: dict[str, str | int] = {
+                "filter": (
+                    f"primary_location.source.id:https://openalex.org/{source_id},"
+                    f"publication_year:{start_year}-{end_year}"
+                ),
+                "group_by": "publication_year",
+                "per-page": 200,
+            }
 
             if not self.session:
                 self.session = aiohttp.ClientSession(
@@ -372,7 +378,7 @@ class OpenAlexClient:
                     trust_env=True,
                 )
 
-            async with self.session.get(url) as response:
+            async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     return {

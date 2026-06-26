@@ -52,6 +52,10 @@ class TestOpenAlexClient:
             assert result is not None
             assert result["display_name"] == "Nature"
             assert "0028-0836" in result["issn"]
+            mock_get.assert_called_once_with(
+                "https://api.openalex.org/sources",
+                params={"filter": "issn:0028-0836"},
+            )
 
     @pytest.mark.asyncio
     async def test_get_source_by_issn_not_found(self):
@@ -115,6 +119,99 @@ class TestOpenAlexClient:
 
             assert result is not None
             assert result["display_name"] == "Journal of Computer Science"
+            mock_get.assert_called_once_with(
+                "https://api.openalex.org/sources",
+                params={"search": "Journal of Computer Science"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_source_by_name_uses_params_for_special_characters(self):
+        """Test source name searches pass special characters as query params."""
+        mock_response_data = {
+            "results": [
+                {
+                    "id": "https://openalex.org/S4306469915",
+                    "display_name": "Heart & Lung",
+                    "works_count": 4625,
+                    "cited_by_count": 75342,
+                    "first_publication_year": 1976,
+                    "last_publication_year": 2026,
+                    "type": "journal",
+                }
+            ]
+        }
+
+        with patch("aiohttp.ClientSession.get") as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value=mock_response_data)
+            mock_response.raise_for_status = Mock()
+            mock_get.return_value.__aenter__.return_value = mock_response
+
+            async with OpenAlexClient() as client:
+                result = await client.get_source_by_name("Heart & Lung")
+
+            assert result is not None
+            assert result["display_name"] == "Heart & Lung"
+            mock_get.assert_called_once_with(
+                "https://api.openalex.org/sources",
+                params={"search": "Heart & Lung"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_sources_by_name_uses_params_and_caps_page_size(self):
+        """Test candidate source searches use params for query encoding."""
+        mock_response_data = {"results": []}
+
+        with patch("aiohttp.ClientSession.get") as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value=mock_response_data)
+            mock_get.return_value.__aenter__.return_value = mock_response
+
+            async with OpenAlexClient() as client:
+                result = await client.get_sources_by_name("Heart & Lung", per_page=200)
+
+            assert result == []
+            mock_get.assert_called_once_with(
+                "https://api.openalex.org/sources",
+                params={"search": "Heart & Lung", "per-page": 50},
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_works_count_by_year_uses_params(self):
+        """Test works count requests pass filters as query params."""
+        mock_response_data = {
+            "group_by": [
+                {"key": "2024", "count": 150},
+                {"key": "2025", "count": 175},
+            ]
+        }
+
+        with patch("aiohttp.ClientSession.get") as mock_get:
+            mock_response = AsyncMock()
+            mock_response.status = 200
+            mock_response.json = AsyncMock(return_value=mock_response_data)
+            mock_get.return_value.__aenter__.return_value = mock_response
+
+            async with OpenAlexClient() as client:
+                result = await client.get_works_count_by_year(
+                    "S4306469915", start_year=2024, end_year=2025
+                )
+
+            assert result == {2024: 150, 2025: 175}
+            mock_get.assert_called_once_with(
+                "https://api.openalex.org/works",
+                params={
+                    "filter": (
+                        "primary_location.source.id:"
+                        "https://openalex.org/S4306469915,"
+                        "publication_year:2024-2025"
+                    ),
+                    "group_by": "publication_year",
+                    "per-page": 200,
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_enrich_journal_data_conference_series_fallback(self):
