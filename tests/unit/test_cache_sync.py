@@ -598,7 +598,6 @@ class TestCacheSyncManager:
             mock_get_registry.return_value = mock_registry
             mock_cache_manager = Mock()
             mock_get_cache_manager.return_value = mock_cache_manager
-            mock_cache_manager.get_available_sources.return_value = ["cached_source"]
             mock_cache_manager.get_source_last_updated.return_value = datetime.now()
             mock_cache_manager.get_source_statistics.return_value = {
                 "cached_source": {"total": 100}
@@ -616,9 +615,45 @@ class TestCacheSyncManager:
             assert cached_status["enabled"] is True
             assert cached_status["type"] == "cached"
             assert cached_status["has_data"] is True
+            assert cached_status["entry_count"] == 100
 
             assert api_status["enabled"] is False
             assert api_status["type"] == "api_cached"
+
+    def test_get_sync_status_requires_cached_entries(self, sync_manager):
+        """Test that registered sources without entries are not reported as data."""
+        cached_backend = MockCachedBackend("cached_backend", "cached_source")
+
+        with (
+            patch(
+                "aletheia_probe.cache_sync.sync_manager.get_config_manager"
+            ) as mock_get_config_manager_func,
+            patch(
+                "aletheia_probe.cache_sync.sync_manager.get_backend_registry"
+            ) as mock_get_registry,
+            patch(
+                "aletheia_probe.cache_sync.sync_manager.DataSourceManager"
+            ) as mock_get_cache_manager,
+        ):
+            mock_config_manager = Mock()
+            mock_config_manager.get_enabled_backends.return_value = ["cached_backend"]
+            mock_get_config_manager_func.return_value = mock_config_manager
+
+            mock_registry = Mock()
+            mock_registry.get_backend_names.return_value = ["cached_backend"]
+            mock_registry.get_backend.return_value = cached_backend
+            mock_get_registry.return_value = mock_registry
+
+            mock_cache_manager = Mock()
+            mock_get_cache_manager.return_value = mock_cache_manager
+            mock_cache_manager.get_source_last_updated.return_value = None
+            mock_cache_manager.get_source_statistics.return_value = {}
+
+            status = sync_manager.get_sync_status()
+            cached_status = status["backends"]["cached_backend"]
+
+            assert cached_status["has_data"] is False
+            assert cached_status["entry_count"] == 0
 
     def test_get_sync_status_backend_error(self, sync_manager):
         """Test getting sync status with backend error."""
@@ -643,7 +678,7 @@ class TestCacheSyncManager:
             mock_get_registry.return_value = mock_registry
             mock_cache_manager = Mock()
             mock_get_cache_manager.return_value = mock_cache_manager
-            mock_cache_manager.get_available_sources.return_value = []
+            mock_cache_manager.get_source_statistics.return_value = {}
 
             status = sync_manager.get_sync_status()
 

@@ -703,7 +703,7 @@ class CacheSyncManager:
         config_manager = get_config_manager()
         enabled_backend_names = config_manager.get_enabled_backends()
         data_source_manager = DataSourceManager()
-        available_sources = data_source_manager.get_available_sources()
+        source_stats = data_source_manager.get_source_statistics()
 
         for backend_name in all_backend_names:
             try:
@@ -724,19 +724,12 @@ class CacheSyncManager:
                 if isinstance(backend, DataSyncCapable):
                     source_name = backend.source_name
                     backend_status["source_name"] = source_name
-                    backend_status["has_data"] = source_name in available_sources
+                    entry_count = source_stats.get(source_name, {}).get("total", 0)
+                    backend_status["has_data"] = entry_count > 0
+                    backend_status["entry_count"] = entry_count
                     backend_status["last_updated"] = (
                         data_source_manager.get_source_last_updated(source_name)
                     )
-
-                    # Get entry count for the source
-                    source_stats = data_source_manager.get_source_statistics()
-                    if source_name in source_stats:
-                        backend_status["entry_count"] = source_stats[source_name].get(
-                            "total", 0
-                        )
-                    else:
-                        backend_status["entry_count"] = 0
 
                 status["backends"][backend_name] = backend_status
 

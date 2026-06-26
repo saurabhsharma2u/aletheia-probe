@@ -9,6 +9,9 @@ from aiohttp import ClientSession
 
 from aletheia_probe.updater.sources.kscien_generic import KscienGenericSource
 from aletheia_probe.updater.sources.kscien_helpers import (
+    KSCIEN_REST_PER_PAGE,
+    KSCIEN_REST_URL,
+    KSCIEN_TAXONOMY_IDS,
     PublicationType,
     deduplicate_entries,
     fetch_kscien_data,
@@ -25,9 +28,9 @@ def mock_session():
 
 @pytest.mark.asyncio
 async def test_fetch_kscien_data_single_page(mock_session):
-    """Test fetching data from a single page."""
+    """Test fetching data from one Kscien REST page."""
     publication_type: PublicationType = PublicationType.PREDATORY_CONFERENCES
-    base_url = f"https://kscien.org/predatory-publishing/?_publishing_list={publication_type.value}"
+    base_url = "https://kscien.org/non-recommended-journals-lists/"
     max_pages = 1
 
     def get_name() -> str:
@@ -35,10 +38,23 @@ async def test_fetch_kscien_data_single_page(mock_session):
 
     mock_response = AsyncMock()
     mock_response.status = 200
-    mock_response.text.return_value = """
-    <h4 class="p-title">Test Conference 1</h4><p><a href="http://example.com/conf1">Visit Website</a></p>
-    <h4 class="p-title">Test Conference 2</h4><p><a href="http://example.com/conf2">Visit Website</a></p>
-    """
+    mock_response.headers = {"X-WP-Total": "2", "X-WP-TotalPages": "1"}
+    mock_response.json.return_value = [
+        {
+            "id": 101,
+            "link": "https://kscien.org/predatory-publishing/test-conference-1/",
+            "title": {"rendered": "Test Conference &amp; Expo 1"},
+            "content": {"rendered": "<p>http://example.com/conf1</p>"},
+        },
+        {
+            "id": 102,
+            "link": "https://kscien.org/predatory-publishing/test-conference-2/",
+            "title": {"rendered": "Test Conference 2"},
+            "content": {
+                "rendered": '<p><a href="http://example.com/conf2">Visit Website</a></p>'
+            },
+        },
+    ]
 
     mock_session.get.return_value.__aenter__.return_value = mock_response
 
@@ -47,15 +63,32 @@ async def test_fetch_kscien_data_single_page(mock_session):
     )
 
     assert len(result) == 2
-    assert result[0]["journal_name"] == "Test Conference 1"
+    assert result[0]["journal_name"] == "Test Conference & Expo 1"
     assert result[1]["metadata"]["website_url"] == "http://example.com/conf2"
+    mock_session.get.assert_called_once_with(
+        KSCIEN_REST_URL,
+        params={
+            "per_page": KSCIEN_REST_PER_PAGE,
+            "page": 1,
+            "publishing-taxonomy": KSCIEN_TAXONOMY_IDS[publication_type],
+        },
+    )
 
 
-def create_mock_response(html_content: str) -> AsyncMock:
-    """Helper to create a mock response with the given HTML content."""
+def create_mock_response(
+    items: list[dict[str, Any]],
+    total: int,
+    total_pages: int,
+    status: int = 200,
+) -> AsyncMock:
+    """Helper to create a mock REST response with the given items."""
     response = AsyncMock()
-    response.status = 200
-    response.text.return_value = html_content
+    response.status = status
+    response.headers = {
+        "X-WP-Total": str(total),
+        "X-WP-TotalPages": str(total_pages),
+    }
+    response.json.return_value = items
 
     # The __aenter__ method of the context manager should return the response
     context_manager = AsyncMock()
@@ -65,29 +98,44 @@ def create_mock_response(html_content: str) -> AsyncMock:
 
 @pytest.mark.asyncio
 async def test_fetch_kscien_data_pagination(mock_session):
-    """Test fetching data with pagination."""
+    """Test fetching Kscien REST data with pagination."""
     publication_type: PublicationType = PublicationType.STANDALONE_JOURNALS
-    base_url = f"https://kscien.org/predatory-publishing/?_publishing_list={publication_type.value}"
+    base_url = "https://kscien.org/non-recommended-journals-lists/"
     max_pages = 2
 
     def get_name() -> str:
         return "test_source"
 
-    # content for each page
-    page_1_content = """
-    <h4 class="p-title">Test Journal 1</h4><p><a href="http://example.com/j1">Visit Website</a></p>
-    <h4 class="p-title">Test Journal 2</h4><p><a href="http://example.com/j2">Visit Website</a></p>
-    <a href="?_publishing_list=standalone-journals&_pagination=2">Next</a>
-    """
+    page_1_items = [
+        {
+            "id": 201,
+            "link": "https://kscien.org/predatory-publishing/test-journal-1/",
+            "title": {"rendered": "Test Journal 1"},
+            "content": {"rendered": "<p>http://example.com/j1</p>"},
+        },
+        {
+            "id": 202,
+            "link": "https://kscien.org/predatory-publishing/test-journal-2/",
+            "title": {"rendered": "Test Journal 2"},
+            "content": {"rendered": "<p>http://example.com/j2</p>"},
+        },
+    ]
+    page_2_items = [
+        {
+            "id": 203,
+            "link": "https://kscien.org/predatory-publishing/test-journal-3/",
+            "title": {"rendered": "Test Journal 3"},
+            "content": {"rendered": "<p>http://example.com/j3</p>"},
+        }
+    ]
 
-    page_2_content = """
-    <h4 class="p-title">Test Journal 3</h4><p><a href="http://example.com/j3">Visit Website</a></p>
-    """
-
-    def get_side_effect(url: str, *args: Any, **kwargs: Any) -> AsyncMock:
-        if "pagination=2" in url:
-            return create_mock_response(page_2_content)
-        return create_mock_response(page_1_content)
+    def get_side_effect(
+        _url: str, *args: Any, **kwargs: Any
+    ) -> AsyncMock:
+        page = kwargs["params"]["page"]
+        if page == 2:
+            return create_mock_response(page_2_items, total=3, total_pages=2)
+        return create_mock_response(page_1_items, total=3, total_pages=2)
 
     mock_session.get.side_effect = get_side_effect
 
@@ -97,6 +145,106 @@ async def test_fetch_kscien_data_pagination(mock_session):
 
     assert len(result) == 3
     assert result[2]["journal_name"] == "Test Journal 3"
+    assert mock_session.get.call_count == 2
+    assert mock_session.get.call_args_list[1].kwargs["params"] == {
+        "per_page": KSCIEN_REST_PER_PAGE,
+        "page": 2,
+        "publishing-taxonomy": KSCIEN_TAXONOMY_IDS[publication_type],
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_kscien_data_retries_transient_page_failure(mock_session):
+    """Test that transient Kscien REST 5xx responses are retried."""
+    publication_type: PublicationType = PublicationType.PREDATORY_CONFERENCES
+
+    def get_name() -> str:
+        return "test_source"
+
+    page_1_items = [
+        {
+            "id": 301,
+            "link": "https://kscien.org/predatory-publishing/test-conference-1/",
+            "title": {"rendered": "Test Conference 1"},
+            "content": {"rendered": "<p>http://example.com/c1</p>"},
+        }
+    ]
+    page_2_items = [
+        {
+            "id": 302,
+            "link": "https://kscien.org/predatory-publishing/test-conference-2/",
+            "title": {"rendered": "Test Conference 2"},
+            "content": {"rendered": "<p>http://example.com/c2</p>"},
+        }
+    ]
+
+    responses = [
+        create_mock_response(page_1_items, total=2, total_pages=2),
+        create_mock_response([], total=2, total_pages=2, status=500),
+        create_mock_response(page_2_items, total=2, total_pages=2),
+    ]
+    mock_session.get.side_effect = responses
+
+    with patch(
+        "aletheia_probe.updater.sources.kscien_helpers.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as mock_sleep:
+        result = await fetch_kscien_data(
+            mock_session,
+            publication_type,
+            "https://kscien.org/non-recommended-journals-lists/",
+            2,
+            get_name,
+        )
+
+    assert len(result) == 2
+    assert result[1]["journal_name"] == "Test Conference 2"
+    assert mock_session.get.call_count == 3
+    mock_sleep.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_kscien_data_rejects_incomplete_results(mock_session):
+    """Test that persistent Kscien page failures do not return partial data."""
+    publication_type: PublicationType = PublicationType.HIJACKED_JOURNALS
+
+    def get_name() -> str:
+        return "test_source"
+
+    page_1_items = [
+        {
+            "id": 401,
+            "link": "https://kscien.org/predatory-publishing/test-journal-1/",
+            "title": {"rendered": "Test Journal 1"},
+            "content": {"rendered": "<p>http://example.com/j1</p>"},
+        }
+    ]
+
+    responses = [
+        create_mock_response(page_1_items, total=2, total_pages=2),
+        create_mock_response([], total=2, total_pages=2, status=500),
+        create_mock_response([], total=2, total_pages=2, status=500),
+        create_mock_response([], total=2, total_pages=2, status=500),
+        create_mock_response([], total=2, total_pages=2, status=500),
+    ]
+    mock_session.get.side_effect = responses
+
+    with (
+        patch(
+            "aletheia_probe.updater.sources.kscien_helpers.asyncio.sleep",
+            new_callable=AsyncMock,
+        ),
+        pytest.raises(ValueError, match="HTTP 500 from REST page 2"),
+    ):
+        await fetch_kscien_data(
+            mock_session,
+            publication_type,
+            "https://kscien.org/non-recommended-journals-lists/",
+            2,
+            get_name,
+        )
+
+    assert mock_session.get.call_count == 5
 
 
 def test_deduplicate_entries():

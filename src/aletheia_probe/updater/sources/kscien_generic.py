@@ -11,6 +11,7 @@ from ...enums import AssessmentType
 from ...logging_config import get_detail_logger, get_status_logger
 from ..core import DataSource
 from .kscien_helpers import (
+    KSCIEN_LIST_PAGE_URL,
     PublicationType,
     deduplicate_entries,
     fetch_kscien_data,
@@ -51,8 +52,8 @@ class KscienGenericSource(DataSource):
         self.publication_type = publication_type
         self.list_type = list_type
 
-        # Configure base URL for the specific publication type
-        self.base_url = f"https://kscien.org/predatory-publishing/?_publishing_list={publication_type.value}"
+        # Kept for the shared fetch signature; Kscien data now comes from REST.
+        self.base_url = KSCIEN_LIST_PAGE_URL
 
         self.timeout = ClientTimeout(total=60)
         self.max_pages = MAX_PAGINATION_PAGES

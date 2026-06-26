@@ -2,22 +2,28 @@
 """Shared utility functions for fetching and parsing data from Kscien.org."""
 
 import asyncio
+import html
 import re
 from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from aiohttp import ClientSession
+from aiohttp import ClientError, ClientSession
 
 from ...enums import AssessmentType
 from ...logging_config import get_detail_logger, get_status_logger
 from ...normalizer import input_normalizer
 
 
-# Maximum reasonable count for an individual Kscien publication type.
-# Used to distinguish between type-specific counts and the global total.
-KSCIEN_TYPE_COUNT_THRESHOLD = 2000
+KSCIEN_LIST_PAGE_URL = "https://kscien.org/non-recommended-journals-lists/"
+KSCIEN_REST_URL = "https://kscien.org/wp-json/wp/v2/predatory-publishing"
+KSCIEN_REST_PER_PAGE = 100
+KSCIEN_REST_PAGE_DELAY_SECONDS = 0.5
+KSCIEN_REST_MAX_ATTEMPTS = 4
+KSCIEN_REST_RETRY_BASE_DELAY_SECONDS = 1.0
+KSCIEN_REST_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_KSCIEN_REST_REQUEST_LOCK = asyncio.Lock()
 
 
 detail_logger = get_detail_logger()
@@ -32,6 +38,15 @@ class PublicationType(str, Enum):
     HIJACKED_JOURNALS = "hijacked-journals"
     PUBLISHERS = "publishers"
     MISLEADING_METRICS = "misleading-metrics"
+
+
+KSCIEN_TAXONOMY_IDS = {
+    PublicationType.HIJACKED_JOURNALS: 10,
+    PublicationType.MISLEADING_METRICS: 11,
+    PublicationType.PREDATORY_CONFERENCES: 12,
+    PublicationType.PUBLISHERS: 13,
+    PublicationType.STANDALONE_JOURNALS: 14,
+}
 
 
 async def fetch_kscien_data(
@@ -54,334 +69,240 @@ async def fetch_kscien_data(
         A list of dictionaries, where each dictionary represents a fetched publication
         containing details such as journal name, source, and metadata.
     """
-    all_publications = []
-    page = 1
+    return await _fetch_kscien_rest_data(
+        session, publication_type, max_pages, get_name
+    )
+
+
+async def _fetch_kscien_rest_data(
+    session: ClientSession,
+    publication_type: PublicationType,
+    max_pages: int,
+    get_name: Callable[[], str],
+) -> list[dict[str, Any]]:
+    """Fetch Kscien entries from the current WordPress REST API."""
+    taxonomy_id = KSCIEN_TAXONOMY_IDS.get(publication_type)
+    if taxonomy_id is None:
+        detail_logger.warning(f"No Kscien taxonomy ID for {publication_type}")
+        return []
+
+    publications = []
     expected_count = None
 
-    while page <= max_pages:
+    for page in range(1, max_pages + 1):
+        params = {
+            "per_page": KSCIEN_REST_PER_PAGE,
+            "page": page,
+            "publishing-taxonomy": taxonomy_id,
+        }
         try:
-            # Construct URL for specific page
-            if page == 1:
-                url = base_url
-            else:
-                # Kscien pagination requires BOTH _publishing_list and _pagination parameters
-                url = f"https://kscien.org/predatory-publishing/?_publishing_list={publication_type.value}&_pagination={page}"
-
-            detail_logger.debug(
-                f"Fetching Kscien {publication_type} page {page}: {url}"
+            page_result = await _fetch_kscien_rest_page(
+                session, params, page, publication_type, get_name
             )
+            if page_result is None:
+                break
 
-            async with session.get(url) as response:
-                if response.status != 200:
-                    detail_logger.warning(f"HTTP {response.status} from {url}")
-                    status_logger.warning(
-                        f"    {get_name()}: HTTP {response.status} from page {page}"
-                    )
-                    break
+            page_items, total_count, total_pages = page_result
+            if expected_count is None:
+                expected_count = total_count
 
-                html_content = await response.text()
-
-                # Extract expected count from first page
-                if page == 1:
-                    expected_count = _extract_expected_count(
-                        html_content, publication_type
-                    )
-                    if expected_count:
-                        detail_logger.info(
-                            f"Expecting {expected_count} total {publication_type} entries"
-                        )
-
-                page_publications = _parse_kscien_page(
-                    html_content, page, publication_type
+            if not isinstance(page_items, list) or not page_items:
+                detail_logger.info(
+                    f"No {publication_type} found on REST page {page}, stopping pagination"
                 )
+                break
 
-                if not page_publications:
-                    detail_logger.info(
-                        f"No {publication_type} found on page {page}, stopping pagination"
+            page_publications = [
+                publication
+                for item in page_items
+                if (
+                    publication := _parse_kscien_rest_item(
+                        item, page, publication_type
                     )
-                    break
-
-                all_publications.extend(page_publications)
-                detail_logger.debug(
-                    f"Found {len(page_publications)} {publication_type} on page {page}"
                 )
+            ]
+            publications.extend(page_publications)
 
-                # Check if there's a next page
-                if not _has_next_page(
-                    html_content, page, expected_count, len(all_publications)
-                ):
-                    detail_logger.info(f"Reached last page at page {page}")
-                    break
+            if page >= total_pages:
+                break
 
-            page += 1
-
-            # Small delay to be respectful to the server
-            await asyncio.sleep(0.5)
-
+        except ValueError:
+            raise
         except Exception as e:
             detail_logger.error(
-                f"Error fetching Kscien {publication_type} page {page}: {e}"
+                f"Error fetching Kscien {publication_type} REST page {page}: {e}"
             )
-            status_logger.error(f"    {get_name()}: Error fetching page {page} - {e}")
+            status_logger.error(
+                f"    {get_name()}: Error fetching REST page {page} - {e}"
+            )
             break
 
-    actual_count = len(all_publications)
-    if expected_count:
-        if actual_count == expected_count:
-            detail_logger.info(
-                f"✅ Successfully fetched {actual_count}/{expected_count} {publication_type} from Kscien across {page - 1} pages"
-            )
-        else:
-            detail_logger.warning(
-                f"⚠️ Count mismatch: fetched {actual_count} but expected {expected_count} {publication_type} (across {page - 1} pages)"
-            )
-            status_logger.warning(
-                f"    {get_name()}: Count mismatch - got {actual_count}, expected {expected_count}"
-            )
-    else:
+        await asyncio.sleep(KSCIEN_REST_PAGE_DELAY_SECONDS)
+
+    actual_count = len(publications)
+    if expected_count is not None and actual_count != expected_count:
+        message = (
+            f"Kscien REST count mismatch: fetched {actual_count}, "
+            f"expected {expected_count} {publication_type}"
+        )
+        detail_logger.warning(f"⚠️ {message}")
+        status_logger.warning(
+            f"    {get_name()}: Count mismatch - got {actual_count}, expected {expected_count}"
+        )
+        raise ValueError(message)
+    elif expected_count is not None:
         detail_logger.info(
-            f"Fetched {actual_count} {publication_type} from Kscien across {page - 1} pages"
-        )
-
-    return all_publications
-
-
-def _extract_expected_count(html: str, publication_type: PublicationType) -> int | None:
-    """Extract the expected total count for this publication type from the page.
-
-    Args:
-        html: The HTML content of the page.
-        publication_type: The type of publication being processed.
-
-    Returns:
-        The expected count as an integer if found, or None if not found.
-    """
-    try:
-        # First try to find the specific count in the filter sections
-        # Pattern: "Predatory Conferences (499)" or similar
-        type_display_names = {
-            PublicationType.PREDATORY_CONFERENCES: r"Predatory\s+Conferences?\s*\(\s*(\d+)\s*\)",
-            PublicationType.STANDALONE_JOURNALS: r"Standalone\s+Journals?\s*\(\s*(\d+)\s*\)",
-            PublicationType.HIJACKED_JOURNALS: r"Hijacked\s+Journals?\s*\(\s*(\d+)\s*\)",
-            PublicationType.PUBLISHERS: r"Publishers?\s*\(\s*(\d+)\s*\)",
-            PublicationType.MISLEADING_METRICS: r"Misleading\s+Metrics?\s*\(\s*(\d+)\s*\)",
-        }
-
-        pattern = type_display_names.get(publication_type)
-        if pattern:
-            count_match = re.search(pattern, html, re.IGNORECASE)
-            if count_match:
-                count = int(count_match.group(1))
-                detail_logger.debug(
-                    f"Found {publication_type} count in filter: {count}"
-                )
-                return count
-
-        # If specific count not found, try pagination info as fallback
-        # Note: This may give total count across all types, not just this type
-        pagination_match = re.search(
-            r"(\d+)\s*-\s*\d+\s*of\s*(\d+)\s*Publishings?", html, re.IGNORECASE
-        )
-        if pagination_match:
-            total_count = int(pagination_match.group(2))
-            detail_logger.debug(
-                f"Found pagination count (may be total across all types): {total_count}"
-            )
-            # Only use if it's reasonable for the specific type
-            if total_count < KSCIEN_TYPE_COUNT_THRESHOLD:
-                return total_count
-            else:
-                detail_logger.debug(
-                    f"Pagination count {total_count} seems like total across all types, ignoring"
-                )
-
-    except Exception as e:
-        detail_logger.debug(f"Error extracting expected count: {e}")
-
-    return None
-
-
-def _parse_kscien_page(
-    html: str,
-    page_num: int,
-    publication_type: PublicationType,
-) -> list[dict[str, Any]]:
-    """Parse publication names from a Kscien.org page using regex.
-
-    Args:
-        html: The HTML content of the page to parse.
-        page_num: The current page number being parsed.
-        publication_type: The type of publication being parsed.
-
-    Returns:
-        A list of dictionaries, where each dictionary represents a parsed publication entry
-        containing metadata and source information.
-    """
-    publications = []
-
-    try:
-        # Pattern to match h4 headings followed by "Visit Website" links
-        pattern = r'<h4[^>]*>(.*?)</h4>\s*<p[^>]*>.*?<a[^>]*href=["\']([^"\']*)["\'][^>]*>.*?Visit\s+Website.*?</a>'
-        matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
-
-        for publication_name_raw, website_url in matches:
-            try:
-                # Clean the publication name
-                publication_name = re.sub(r"<[^>]+>", "", publication_name_raw).strip()
-                if not publication_name:
-                    continue
-
-                # Clean the URL
-                website_url = website_url.strip()
-
-                # Create publication entry
-                publication_entry = {
-                    "journal_name": publication_name,  # Core updater expects this field name
-                    "normalized_name": None,  # Will be set during deduplication
-                    "source": f"kscien_{publication_type}",
-                    "source_url": "https://kscien.org/predatory-publishing/",
-                    "page": page_num,
-                    "metadata": {
-                        "website_url": website_url,
-                        "publication_type": publication_type,
-                        "list_type": AssessmentType.PREDATORY.value,
-                        "authority_level": 8,  # High authority like Beall's
-                        "last_verified": datetime.now().isoformat(),
-                    },
-                }
-
-                publications.append(publication_entry)
-                detail_logger.debug(f"Parsed {publication_type}: {publication_name}")
-
-            except Exception as e:
-                detail_logger.warning(
-                    f"Error parsing individual {publication_type} on page {page_num}: {e}"
-                )
-                detail_logger.debug(
-                    f"    kscien_{publication_type}: Parse error on page {page_num} - {e}"
-                )
-                continue
-
-        # Alternative pattern for publications without "Visit Website" links
-        if not publications:
-            # UI elements to exclude - these are common page elements, not publications
-            ui_elements = {
-                "lorem ipsum dolor sit amet consectetur adipiscing elit",
-                "contact",
-                "publishing search",
-                "publishing list",
-                "reset",
-                "publishing resault count",
-                "publishing result count",
-                "publishing sort list",
-                "visit website",
-                "read more",
-                "learn more",
-                "search",
-                "filter",
-                "sort by",
-                "show all",
-                "hide all",
-                "next",
-                "previous",
-                "page",
-            }
-
-            simple_pattern = r"<h4[^>]*>(.*?)</h4>"
-            simple_matches = re.findall(simple_pattern, html, re.DOTALL | re.IGNORECASE)
-
-            for publication_name_raw in simple_matches:
-                try:
-                    publication_name = re.sub(
-                        r"<[^>]+>", "", publication_name_raw
-                    ).strip()
-                    if not publication_name or len(publication_name) < 5:
-                        continue
-
-                    # Skip UI elements
-                    if publication_name.lower() in ui_elements:
-                        continue
-
-                    publication_entry = {
-                        "journal_name": publication_name,
-                        "normalized_name": None,
-                        "source": f"kscien_{publication_type}",
-                        "source_url": "https://kscien.org/predatory-publishing/",
-                        "page": page_num,
-                        "metadata": {
-                            "website_url": None,
-                            "publication_type": publication_type,
-                            "list_type": AssessmentType.PREDATORY.value,
-                            "authority_level": 8,
-                            "last_verified": datetime.now().isoformat(),
-                        },
-                    }
-
-                    publications.append(publication_entry)
-                    detail_logger.debug(
-                        f"Parsed {publication_type} (simple): {publication_name}"
-                    )
-
-                except Exception as e:
-                    detail_logger.warning(
-                        f"Error parsing simple {publication_type} on page {page_num}: {e}"
-                    )
-                    detail_logger.debug(
-                        f"    kscien_{publication_type}: Simple parse error on page {page_num} - {e}"
-                    )
-                    continue
-
-    except Exception as e:
-        detail_logger.error(
-            f"Error parsing Kscien {publication_type} page {page_num}: {e}"
-        )
-        status_logger.error(
-            f"    kscien_{publication_type}: Error parsing page {page_num} - {e}"
+            f"✅ Successfully fetched {actual_count}/{expected_count} {publication_type} from Kscien REST"
         )
 
     return publications
 
 
-def _has_next_page(
-    html: str, current_page: int, expected_count: int | None, items_fetched: int
-) -> bool:
-    """Check if there's a next page in Kscien pagination.
-
-    Args:
-        html: The HTML content of the current page.
-        current_page: The current page number.
-        expected_count: Expected total count for this publication type (if available).
-        items_fetched: Number of items fetched so far.
-
-    Returns:
-        True if there are more pages to fetch, False otherwise.
-    """
-    try:
-        # If we have the expected count for this specific publication type, use it
-        if expected_count is not None:
-            # If we've fetched all expected items, no more pages
-            if items_fetched >= expected_count:
-                detail_logger.debug(
-                    f"Fetched {items_fetched}/{expected_count} items, no more pages"
-                )
-                return False
-
+async def _fetch_kscien_rest_page(
+    session: ClientSession,
+    params: dict[str, int],
+    page: int,
+    publication_type: PublicationType,
+    get_name: Callable[[], str],
+) -> tuple[list[Any], int | None, int] | None:
+    """Fetch one Kscien REST page with retry handling for transient failures."""
+    for attempt in range(1, KSCIEN_REST_MAX_ATTEMPTS + 1):
+        retry_status = None
+        try:
             detail_logger.debug(
-                f"Fetched {items_fetched}/{expected_count} items so far, continuing"
+                f"Fetching Kscien {publication_type} REST page {page}: {KSCIEN_REST_URL}"
             )
-            # Continue fetching if we haven't reached the expected count
-            return True
+            async with _KSCIEN_REST_REQUEST_LOCK:
+                async with session.get(KSCIEN_REST_URL, params=params) as response:
+                    if response.status == 400 and page > 1:
+                        detail_logger.debug(
+                            f"Kscien REST page {page} returned 400, stopping pagination"
+                        )
+                        return None
 
-        # If we don't have an expected count, continue fetching
-        # The empty page check in fetch_kscien_data will stop pagination
-        detail_logger.debug(
-            "No expected count available, continuing to fetch (rely on empty page detection)"
+                    if response.status == 200:
+                        total_header = response.headers.get("X-WP-Total")
+                        total_pages_header = response.headers.get("X-WP-TotalPages")
+                        total_count = int(total_header) if total_header else None
+                        total_pages = (
+                            int(total_pages_header) if total_pages_header else page
+                        )
+                        page_items = await response.json(content_type=None)
+                        return page_items, total_count, total_pages
+
+                    if (
+                        response.status in KSCIEN_REST_RETRY_STATUSES
+                        and attempt < KSCIEN_REST_MAX_ATTEMPTS
+                    ):
+                        retry_status = response.status
+                    else:
+                        raise ValueError(
+                            f"HTTP {response.status} from REST page {page}"
+                        )
+
+        except (ClientError, TimeoutError) as e:
+            if attempt >= KSCIEN_REST_MAX_ATTEMPTS:
+                raise ValueError(
+                    f"Kscien REST page {page} failed after {attempt} attempts: {e}"
+                ) from e
+            await _sleep_before_retry(page, attempt, get_name, error=e)
+            continue
+
+        if retry_status is not None:
+            await _sleep_before_retry(page, attempt, get_name, status=retry_status)
+            continue
+
+    raise ValueError(
+        f"Kscien REST page {page} failed after {KSCIEN_REST_MAX_ATTEMPTS} attempts"
+    )
+
+
+async def _sleep_before_retry(
+    page: int,
+    attempt: int,
+    get_name: Callable[[], str],
+    status: int | None = None,
+    error: BaseException | None = None,
+) -> None:
+    """Sleep before retrying a transient Kscien REST failure."""
+    delay = KSCIEN_REST_RETRY_BASE_DELAY_SECONDS * attempt
+    if status is not None:
+        detail_logger.warning(
+            f"Kscien REST page {page} returned HTTP {status}; retrying in {delay:.1f}s"
         )
-        return True
+        status_logger.warning(
+            f"    {get_name()}: HTTP {status} from REST page {page}, retrying"
+        )
+    elif error is not None:
+        detail_logger.warning(
+            f"Kscien REST page {page} failed with {error}; retrying in {delay:.1f}s"
+        )
+        status_logger.warning(
+            f"    {get_name()}: REST page {page} failed, retrying - {error}"
+        )
 
-    except Exception as e:
-        detail_logger.debug(f"Error checking pagination: {e}")
-        return True  # Continue on error, let empty page detection stop us
+    await asyncio.sleep(delay)
+
+
+def _parse_kscien_rest_item(
+    item: Any,
+    page_num: int,
+    publication_type: PublicationType,
+) -> dict[str, Any] | None:
+    """Parse one Kscien WordPress REST API item into cache input format."""
+    if not isinstance(item, dict):
+        return None
+
+    title = item.get("title", {})
+    publication_name = title.get("rendered") if isinstance(title, dict) else title
+    if not isinstance(publication_name, str):
+        return None
+
+    publication_name = _clean_html_text(publication_name)
+    if not publication_name:
+        return None
+
+    content = item.get("content", {})
+    rendered_content = (
+        content.get("rendered", "") if isinstance(content, dict) else str(content or "")
+    )
+    website_url = _extract_website_url(rendered_content)
+
+    return {
+        "journal_name": publication_name,
+        "normalized_name": None,
+        "source": f"kscien_{publication_type.value}",
+        "source_url": KSCIEN_LIST_PAGE_URL,
+        "page": page_num,
+        "metadata": {
+            "website_url": website_url,
+            "publication_type": publication_type.value,
+            "list_type": AssessmentType.PREDATORY.value,
+            "authority_level": 8,
+            "last_verified": datetime.now().isoformat(),
+            "kscien_post_id": item.get("id"),
+            "kscien_post_url": item.get("link"),
+        },
+    }
+
+
+def _clean_html_text(value: str) -> str:
+    """Strip HTML tags/entities and normalize whitespace."""
+    without_tags = re.sub(r"<[^>]+>", " ", value)
+    return " ".join(html.unescape(without_tags).split()).strip()
+
+
+def _extract_website_url(rendered_content: str) -> str | None:
+    """Extract the listed publication website URL from rendered item content."""
+    href_match = re.search(r'href=["\']([^"\']+)["\']', rendered_content, re.IGNORECASE)
+    if href_match:
+        return html.unescape(href_match.group(1)).strip()
+
+    text = _clean_html_text(rendered_content)
+    url_match = re.search(r"https?://\S+", text)
+    if url_match:
+        return url_match.group(0).rstrip(".,;)")
+    return None
 
 
 def deduplicate_entries(publications: list[dict[str, Any]]) -> list[dict[str, Any]]:
