@@ -28,19 +28,20 @@ def _iter_jsonl_records(input_path: Path) -> Any:
                 yield payload
 
 
-def _collect_backend_names(input_path: Path) -> list[str]:
+def _collect_backend_names(input_paths: list[Path]) -> list[str]:
     """Collect unique backend names appearing in backend_results arrays."""
     backend_names: set[str] = set()
-    for record in _iter_jsonl_records(input_path):
-        backend_results = record.get("backend_results", [])
-        if not isinstance(backend_results, list):
-            continue
-        for backend_result in backend_results:
-            if not isinstance(backend_result, dict):
+    for input_path in input_paths:
+        for record in _iter_jsonl_records(input_path):
+            backend_results = record.get("backend_results", [])
+            if not isinstance(backend_results, list):
                 continue
-            backend_name = backend_result.get("backend_name")
-            if isinstance(backend_name, str) and backend_name:
-                backend_names.add(backend_name)
+            for backend_result in backend_results:
+                if not isinstance(backend_result, dict):
+                    continue
+                backend_name = backend_result.get("backend_name")
+                if isinstance(backend_name, str) and backend_name:
+                    backend_names.add(backend_name)
     return sorted(backend_names)
 
 
@@ -116,13 +117,13 @@ def _backend_cell_value(backend_result: dict[str, Any]) -> str:
 
 
 def condense_jsonl_to_csv(
-    input_path: Path,
+    input_paths: list[Path],
     output_path: Path,
     backend_columns: int,
     include_non_found: bool,
 ) -> None:
-    """Write condensed CSV from mass-eval JSONL."""
-    backend_names = _collect_backend_names(input_path)
+    """Write condensed CSV from one or more mass-eval JSONL files."""
+    backend_names = _collect_backend_names(input_paths)
 
     base_fields = [
         "entry_key",
@@ -158,43 +159,44 @@ def condense_jsonl_to_csv(
         writer = csv.DictWriter(handle, fieldnames=base_fields + backend_fields)
         writer.writeheader()
 
-        for record in _iter_jsonl_records(input_path):
-            row = _build_base_row(record)
-            backend_index: dict[str, dict[str, Any]] = {}
-            backend_results = record.get("backend_results", [])
-            if isinstance(backend_results, list):
-                for backend_result in backend_results:
-                    if not isinstance(backend_result, dict):
+        for input_path in input_paths:
+            for record in _iter_jsonl_records(input_path):
+                row = _build_base_row(record)
+                backend_index: dict[str, dict[str, Any]] = {}
+                backend_results = record.get("backend_results", [])
+                if isinstance(backend_results, list):
+                    for backend_result in backend_results:
+                        if not isinstance(backend_result, dict):
+                            continue
+                        backend_name = backend_result.get("backend_name")
+                        if isinstance(backend_name, str) and backend_name:
+                            backend_index[backend_name] = backend_result
+
+                for backend_name in backend_names:
+                    result_key = f"{backend_name}_result"
+                    confidence_key = f"{backend_name}_confidence"
+                    backend_result = backend_index.get(backend_name)
+                    if not backend_result:
+                        row[result_key] = ""
+                        if backend_columns == 2:
+                            row[confidence_key] = ""
                         continue
-                    backend_name = backend_result.get("backend_name")
-                    if isinstance(backend_name, str) and backend_name:
-                        backend_index[backend_name] = backend_result
 
-            for backend_name in backend_names:
-                result_key = f"{backend_name}_result"
-                confidence_key = f"{backend_name}_confidence"
-                backend_result = backend_index.get(backend_name)
-                if not backend_result:
-                    row[result_key] = ""
+                    status = str(backend_result.get("status") or "").lower()
+                    if not include_non_found and status != "found":
+                        row[result_key] = ""
+                        if backend_columns == 2:
+                            row[confidence_key] = ""
+                        continue
+
+                    row[result_key] = _backend_cell_value(backend_result)
                     if backend_columns == 2:
-                        row[confidence_key] = ""
-                    continue
+                        confidence_value = backend_result.get("confidence")
+                        row[confidence_key] = (
+                            "" if confidence_value is None else _fmt_float(confidence_value)
+                        )
 
-                status = str(backend_result.get("status") or "").lower()
-                if not include_non_found and status != "found":
-                    row[result_key] = ""
-                    if backend_columns == 2:
-                        row[confidence_key] = ""
-                    continue
-
-                row[result_key] = _backend_cell_value(backend_result)
-                if backend_columns == 2:
-                    confidence_value = backend_result.get("confidence")
-                    row[confidence_key] = (
-                        "" if confidence_value is None else _fmt_float(confidence_value)
-                    )
-
-            writer.writerow(row)
+                writer.writerow(row)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -204,7 +206,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "and per-backend result columns."
         )
     )
-    parser.add_argument("input", type=Path, help="Path to input JSONL file")
+    parser.add_argument(
+        "input", type=Path, nargs="+", help="Path(s) to input JSONL file(s)"
+    )
     parser.add_argument("output", type=Path, help="Path to output CSV file")
     parser.add_argument(
         "--backend-columns",
@@ -225,19 +229,20 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    input_path: Path = args.input.expanduser().resolve()
+    input_paths: list[Path] = [p.expanduser().resolve() for p in args.input]
     output_path: Path = args.output.expanduser().resolve()
 
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+    for input_path in input_paths:
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
 
     condense_jsonl_to_csv(
-        input_path=input_path,
+        input_paths=input_paths,
         output_path=output_path,
         backend_columns=args.backend_columns,
         include_non_found=bool(args.include_non_found),
     )
-    print(f"Wrote condensed CSV: {output_path}")
+    print(f"Wrote condensed CSV ({len(input_paths)} input file(s)): {output_path}")
 
 
 if __name__ == "__main__":

@@ -15,9 +15,9 @@ T = TypeVar("T")
 
 
 def async_retry_with_backoff(
-    max_retries: int = 3,
-    initial_delay: float = 1.0,
-    max_delay: float = 60.0,
+    max_retries: int = 15,
+    initial_delay: float = 30.0,
+    max_delay: float = 1800.0,
     exponential_base: float = 2.0,
     exceptions: tuple[type[Exception], ...] = (Exception,),
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:

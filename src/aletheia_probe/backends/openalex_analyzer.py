@@ -258,8 +258,8 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
         self._store_acronym_from_openalex(openalex_data, query_input)
 
         # Route to appropriate assessment based on publication type
-        source_type = openalex_data.get("source_type", "").lower()
-        display_name = openalex_data.get("display_name", "").lower()
+        source_type = (openalex_data.get("source_type") or "").lower()
+        display_name = (openalex_data.get("display_name") or "").lower()
 
         # Override OpenAlex misclassification if display_name suggests conference
         # OpenAlex sometimes incorrectly classifies conference proceedings as journals
@@ -325,7 +325,11 @@ class OpenAlexAnalyzerBackend(ApiBackendWithCache, FallbackStrategyMixin):
         Returns:
             Error BackendResult
         """
-        self.detail_logger.error(f"OpenAlex API error: {exception}")
+        import traceback as _traceback
+        self.detail_logger.error(
+            f"OpenAlex API error: {exception}\n"
+            f"{''.join(_traceback.format_tb(exception.__traceback__))}"
+        )
 
         return BackendResult(
             backend_name=self.get_name(),

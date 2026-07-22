@@ -100,7 +100,7 @@ class OpenAlexClient:
         """Async context manager entry."""
         self.session = aiohttp.ClientSession(
             headers=self.headers,
-            timeout=aiohttp.ClientTimeout(total=30),
+            timeout=aiohttp.ClientTimeout(total=300),
             trust_env=True,
         )
         return self
@@ -132,7 +132,7 @@ class OpenAlexClient:
             if not self.session:
                 self.session = aiohttp.ClientSession(
                     headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=300),
                     trust_env=True,
                 )
 
@@ -265,7 +265,7 @@ class OpenAlexClient:
             if not self.session:
                 self.session = aiohttp.ClientSession(
                     headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=300),
                     trust_env=True,
                 )
 
@@ -313,7 +313,7 @@ class OpenAlexClient:
             if not self.session:
                 self.session = aiohttp.ClientSession(
                     headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=300),
                     trust_env=True,
                 )
 
@@ -411,7 +411,7 @@ class OpenAlexClient:
             if not self.session:
                 self.session = aiohttp.ClientSession(
                     headers=self.headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=300),
                     trust_env=True,
                 )
 
@@ -604,6 +604,6 @@ async def get_publication_stats(
     try:
         async with create_openalex_client() as client:
             return await client.enrich_journal_data(journal_name, issn, eissn)
-    except (aiohttp.ClientError, ValueError, KeyError, AttributeError) as e:
+    except Exception as e:
         detail_logger.error(f"Error getting publication stats: {e}")
         return None

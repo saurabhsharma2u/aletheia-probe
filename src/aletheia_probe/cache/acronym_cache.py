@@ -429,7 +429,7 @@ class AcronymCache(CacheBase):
                 ):
                     status_logger.warning(
                         f"Acronym '{acronym}' ({entity_type}) already maps to "
-                        f"'{existing['canonical']}', overwriting with '{canonical}'"
+                        f"'{existing['canonical']}', keeping original (ignoring '{canonical}')"
                     )
 
             cursor.execute(
@@ -437,10 +437,7 @@ class AcronymCache(CacheBase):
                 INSERT INTO venue_acronyms
                     (acronym, entity_type, canonical, confidence_score, source_file)
                 VALUES (?, ?, ?, 0.0, ?)
-                ON CONFLICT(acronym, entity_type) DO UPDATE SET
-                    canonical   = excluded.canonical,
-                    source_file = excluded.source_file,
-                    imported_at = CURRENT_TIMESTAMP
+                ON CONFLICT(acronym, entity_type) DO NOTHING
                 """,
                 (acronym, entity_type, canonical, source),
             )

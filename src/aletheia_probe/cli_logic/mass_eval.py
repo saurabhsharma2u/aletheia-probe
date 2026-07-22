@@ -7,8 +7,10 @@ import asyncio
 import hashlib
 import json
 import multiprocessing
+import os
 import random
 import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ProcessPoolExecutor
@@ -287,9 +289,9 @@ class MassEvalState:
             "input_path": self.input_path,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
-            "completed_files": self.completed_files,
-            "failed_files": self.failed_files,
-            "file_progress": self.file_progress,
+            "completed_files": list(self.completed_files),
+            "failed_files": dict(self.failed_files),
+            "file_progress": {k: dict(v) for k, v in self.file_progress.items()},
             "current_file": self.current_file,
             "processed_entries": self.processed_entries,
             "written_records": self.written_records,
@@ -330,8 +332,28 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _write_checkpoint_payload(payload: dict[str, Any], state_path: Path) -> None:
+    """Write a pre-built checkpoint payload to disk atomically (I/O only, safe to call from a thread).
+
+    Uses a per-call unique temp file (mkstemp) so concurrent checkpoint threads
+    cannot collide on the same .tmp path and cause FileNotFoundError on rename.
+    """
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=state_path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_name, state_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def _checkpoint_state(state: MassEvalState, *, force: bool = False) -> None:
-    """Persist checkpoint state atomically.
+    """Persist checkpoint state atomically (sync — only call when no concurrent mutations).
 
     Throttled to CHECKPOINT_INTERVAL_SECONDS to avoid writing on every entry.
     Use force=True at structural boundaries (file completion, retries, end-of-run).
@@ -341,11 +363,30 @@ def _checkpoint_state(state: MassEvalState, *, force: bool = False) -> None:
         return
     state.updated_at = _utc_now()
     payload = state.to_dict()
-    tmp_path = state.state_path.with_suffix(state.state_path.suffix + ".tmp")
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    tmp_path.replace(state.state_path)
+    _write_checkpoint_payload(payload, state.state_path)
+    state._last_checkpoint_time = now
+
+
+async def _checkpoint_state_async(state: MassEvalState, *, force: bool = False) -> None:
+    """Checkpoint state without blocking the event loop on CephFS write latency.
+
+    The event loop thread must not perform synchronous file I/O: a slow CephFS
+    write (5–120 s is realistic under contention) would prevent asyncio.wait_for
+    timers from firing, causing spurious backend timeouts even when the actual
+    DB queries complete in milliseconds.
+
+    The snapshot (to_dict) is taken here in the event loop before dispatching to a
+    thread.  Because to_dict() contains no awaits, the event loop cannot interleave
+    any other coroutine while the snapshot is being built, so the state containers
+    (file_progress, completed_files, failed_files) cannot be mutated concurrently.
+    Only the I/O is offloaded to the thread.
+    """
+    now = time.monotonic()
+    if not force and (now - state._last_checkpoint_time) < CHECKPOINT_INTERVAL_SECONDS:
+        return
+    state.updated_at = _utc_now()
+    payload = state.to_dict()
+    await asyncio.to_thread(_write_checkpoint_payload, payload, state.state_path)
     state._last_checkpoint_time = now
 
 
@@ -591,17 +632,31 @@ async def _assess_with_retry(
     query_input = input_normalizer.normalize(venue_name)
     query_input.venue_type = venue_type
 
+    # Track consecutive TIMEOUT responses per backend to detect systematic (non-transient)
+    # failures.  After MAX_CONSECUTIVE_BACKEND_TIMEOUTS timeouts for the same backend we
+    # stop treating it as transient so the entry is not retried forever.
+    _MAX_CONSECUTIVE_BACKEND_TIMEOUTS = 5
+    _consecutive_timeouts: dict[str, int] = {}
+
     while True:
         result = await query_dispatcher.assess_journal(query_input)
 
         if not retry_forever:
             return result
 
+        # Update per-backend consecutive timeout counters.
+        for br in result.backend_results:
+            if br.status == BackendStatus.TIMEOUT:
+                _consecutive_timeouts[br.backend_name] = _consecutive_timeouts.get(br.backend_name, 0) + 1
+            elif br.backend_name in _consecutive_timeouts:
+                del _consecutive_timeouts[br.backend_name]
+
         transient_statuses = {BackendStatus.RATE_LIMITED, BackendStatus.TIMEOUT}
         transient_backends = [
             f"{backend_result.backend_name}:{backend_result.status.value}"
             for backend_result in result.backend_results
             if backend_result.status in transient_statuses
+            and _consecutive_timeouts.get(backend_result.backend_name, 0) < _MAX_CONSECUTIVE_BACKEND_TIMEOUTS
         ]
         if not transient_backends:
             return result
@@ -610,7 +665,7 @@ async def _assess_with_retry(
             attempt_number = await on_retry()
         else:
             state.retry_count += 1
-            _checkpoint_state(state, force=True)
+            await _checkpoint_state_async(state, force=True)
             attempt_number = state.retry_count
 
         # TIMEOUT means a local backend was too slow (system under load) — retry
@@ -699,7 +754,7 @@ async def _collect_with_retry(
                 attempt_number = await on_retry()
             else:
                 state.retry_count += 1
-                _checkpoint_state(state, force=True)
+                await _checkpoint_state_async(state, force=True)
                 attempt_number = state.retry_count
 
             sleep_seconds = min(retry_delay, RETRY_MAX_SECONDS)
@@ -876,7 +931,7 @@ async def _process_single_file(
             state.failed_files.pop(file_key, None)
             progress["completed_entry_indices"] = []
             progress["last_error"] = None
-            _checkpoint_state(state, force=True)
+            await _checkpoint_state_async(state, force=True)
         await _log_file_completion("already_complete")
         return
 
@@ -892,7 +947,7 @@ async def _process_single_file(
                 state.completed_files.append(file_key)
             state.failed_files.pop(file_key, None)
             progress["last_error"] = None
-            _checkpoint_state(state, force=True)
+            await _checkpoint_state_async(state, force=True)
         await _log_file_completion("already_complete_sparse")
         return
 
@@ -906,8 +961,30 @@ async def _process_single_file(
     async def _reserve_retry_attempt() -> int:
         async with state_lock:
             state.retry_count += 1
-            _checkpoint_state(state, force=True)
+            await _checkpoint_state_async(state, force=True)
             return state.retry_count
+
+    async def _write_assessment_error_record(entry_index: int, e: Exception) -> None:
+        """Write an error record for an entry that failed with a non-transient error."""
+        if output_file is None:
+            return
+        entry = entries[entry_index]
+        record = _build_minimal_record(file_path, entry)
+        record["state"] = "error"
+        record["state_reason"] = str(e)
+        record_id = str(record["record_id"])
+        status_logger.warning(f"Skipping entry '{entry.key}' in {file_path}: {e}")
+        async with state_lock:
+            if record_id not in existing_record_ids:
+                await asyncio.to_thread(_append_jsonl_record, output_file, record)
+                existing_record_ids.add(record_id)
+                state.written_records += 1
+                progress["written_records"] = int(progress.get("written_records", 0)) + 1
+            state.processed_entries += 1
+            completed_entry_indices.add(entry_index)
+            _advance_file_progress(progress, completed_entry_indices, len(entries))
+            progress["last_error"] = str(e)
+            await _checkpoint_state_async(state)
 
     async def _process_entry(entry_index: int) -> None:
         entry = entries[entry_index]
@@ -925,7 +1002,7 @@ async def _process_single_file(
                 record_id = str(record["record_id"])
                 async with state_lock:
                     if record_id not in existing_record_ids:
-                        _append_jsonl_record(output_file, record)
+                        await asyncio.to_thread(_append_jsonl_record, output_file, record)
                         existing_record_ids.add(record_id)
                         state.written_records += 1
                         progress["written_records"] = (
@@ -937,7 +1014,7 @@ async def _process_single_file(
                         progress, completed_entry_indices, len(entries)
                     )
                     progress["last_error"] = None
-                    _checkpoint_state(state)
+                    await _checkpoint_state_async(state)
             else:
                 # collect mode: nothing to cache for non-assessed entry
                 async with state_lock:
@@ -947,7 +1024,7 @@ async def _process_single_file(
                         progress, completed_entry_indices, len(entries)
                     )
                     progress["last_error"] = None
-                    _checkpoint_state(state)
+                    await _checkpoint_state_async(state)
             return
 
         if mode == "collect":
@@ -971,7 +1048,7 @@ async def _process_single_file(
                             progress, completed_entry_indices, len(entries)
                         )
                         progress["last_error"] = None
-                        _checkpoint_state(state)
+                        await _checkpoint_state_async(state)
                     return
 
                 if wait_future is None:
@@ -1019,7 +1096,7 @@ async def _process_single_file(
                 completed_entry_indices.add(entry_index)
                 _advance_file_progress(progress, completed_entry_indices, len(entries))
                 progress["last_error"] = None
-                _checkpoint_state(state)
+                await _checkpoint_state_async(state)
         else:
             if assess_dedupe_cache is not None:
                 assess_key = _build_collect_cache_key_raw(
@@ -1044,25 +1121,39 @@ async def _process_single_file(
                         await assess_dedupe_cache.mark_done(
                             assess_key, assessment, owner_future
                         )
+                    except ValueError as exc:
+                        await assess_dedupe_cache.mark_failure(
+                            assess_key, exc, owner_future
+                        )
+                        await _write_assessment_error_record(entry_index, exc)
+                        return
                     except Exception as exc:
                         await assess_dedupe_cache.mark_failure(
                             assess_key, exc, owner_future
                         )
                         raise
                 elif isinstance(future_or_result, asyncio.Future):
-                    assessment = await future_or_result
+                    try:
+                        assessment = await future_or_result
+                    except ValueError as e:
+                        await _write_assessment_error_record(entry_index, e)
+                        return
                 else:
                     assessment = future_or_result
             else:
-                assessment = await _assess_with_retry(
-                    venue_name=entry.journal_name,
-                    venue_type=entry.venue_type,
-                    retry_forever=retry_forever,
-                    state=state,
-                    detail_logger=detail_logger,
-                    status_logger=status_logger,
-                    on_retry=_reserve_retry_attempt,
-                )
+                try:
+                    assessment = await _assess_with_retry(
+                        venue_name=entry.journal_name,
+                        venue_type=entry.venue_type,
+                        retry_forever=retry_forever,
+                        state=state,
+                        detail_logger=detail_logger,
+                        status_logger=status_logger,
+                        on_retry=_reserve_retry_attempt,
+                    )
+                except ValueError as e:
+                    await _write_assessment_error_record(entry_index, e)
+                    return
             if output_file is None:
                 raise ValueError("Output file is not configured in assess mode")
             record = _build_assess_record(file_path, entry, assessment)
@@ -1070,7 +1161,7 @@ async def _process_single_file(
 
             async with state_lock:
                 if record_id not in existing_record_ids:
-                    _append_jsonl_record(output_file, record)
+                    await asyncio.to_thread(_append_jsonl_record, output_file, record)
                     existing_record_ids.add(record_id)
                     state.written_records += 1
                     progress["written_records"] = (
@@ -1081,7 +1172,7 @@ async def _process_single_file(
                 completed_entry_indices.add(entry_index)
                 _advance_file_progress(progress, completed_entry_indices, len(entries))
                 progress["last_error"] = None
-                _checkpoint_state(state)
+                await _checkpoint_state_async(state)
 
     async def _worker() -> None:
         while True:
@@ -1116,7 +1207,7 @@ async def _process_single_file(
         state.failed_files.pop(file_key, None)
         progress["completed_entry_indices"] = []
         progress["last_error"] = None
-        _checkpoint_state(state, force=True)
+        await _checkpoint_state_async(state, force=True)
     await _log_file_completion("processed")
 
 
@@ -1224,7 +1315,7 @@ async def _async_mass_eval_main(
             while True:
                 await asyncio.sleep(checkpoint_interval_seconds)
                 async with files_lock:
-                    _checkpoint_state(state, force=True)
+                    await _checkpoint_state_async(state, force=True)
                     if collect_dedupe_cache is not None:
                         await collect_dedupe_cache.flush()
 
@@ -1282,7 +1373,7 @@ async def _async_mass_eval_main(
             pass
 
         state.current_file = None
-        _checkpoint_state(state, force=True)
+        await _checkpoint_state_async(state, force=True)
         if collect_dedupe_cache is not None:
             await collect_dedupe_cache.flush(force=True)
 

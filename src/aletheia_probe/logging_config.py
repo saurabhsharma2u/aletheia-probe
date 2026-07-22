@@ -9,6 +9,8 @@ This module provides a dual-logger system:
 from __future__ import annotations
 
 import logging
+import logging.handlers
+import queue
 import sys
 from pathlib import Path
 
@@ -31,6 +33,12 @@ def setup_logging(log_dir: Path | None = None) -> tuple[logging.Logger, logging.
         - Writes to both stderr (console) and file
         - Used for progress updates, status messages, warnings, and errors
 
+    The file handler runs in a dedicated background thread via QueueHandler /
+    QueueListener so that CephFS write latency never blocks the asyncio event
+    loop.  Without this, a slow CephFS write (5–120 s is realistic under load)
+    would freeze the event loop and cause asyncio.wait_for timeouts on backends
+    that are otherwise healthy.
+
     Args:
         log_dir: Directory for log file. If None, uses .aletheia-probe/ in current directory
 
@@ -50,28 +58,39 @@ def setup_logging(log_dir: Path | None = None) -> tuple[logging.Logger, logging.
         handler.close()
     root_logger.handlers.clear()
 
-    # Create shared file handler for both loggers
+    # ── Real file handler (runs in the QueueListener thread, not the event loop) ──
     # Mode 'w' overwrites the file each time
     file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.INFO)
     file_formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(file_formatter)
 
+    # ── Queue-based non-blocking handler ──────────────────────────────────────
+    # Loggers attach QueueHandler; a background QueueListener thread does the
+    # actual file write.  The event loop thread never blocks on file I/O.
+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+    queue_handler = logging.handlers.QueueHandler(log_queue)  # type: ignore[arg-type]
+
+    listener = logging.handlers.QueueListener(
+        log_queue,  # type: ignore[arg-type]
+        file_handler,
+        respect_handler_level=True,
+    )
+    listener.start()
+
     # ===== Detail Logger Setup =====
-    # This logger writes verbose technical details to file only
     detail_logger = logging.getLogger(DETAIL_LOGGER_NAME)
-    detail_logger.setLevel(logging.DEBUG)
+    detail_logger.setLevel(logging.INFO)
     for handler in detail_logger.handlers[:]:
         handler.close()
     detail_logger.handlers.clear()
-    detail_logger.addHandler(file_handler)
-    detail_logger.propagate = False  # Don't propagate to root logger
+    detail_logger.addHandler(queue_handler)
+    detail_logger.propagate = False
 
     # ===== Status Logger Setup =====
-    # This logger writes user-facing status to both console and file
     status_logger = logging.getLogger(STATUS_LOGGER_NAME)
     status_logger.setLevel(logging.INFO)
     for handler in status_logger.handlers[:]:
@@ -94,8 +113,8 @@ def setup_logging(log_dir: Path | None = None) -> tuple[logging.Logger, logging.
     flushing_console_handler.setFormatter(console_formatter)
 
     status_logger.addHandler(flushing_console_handler)
-    status_logger.addHandler(file_handler)
-    status_logger.propagate = False  # Don't propagate to root logger
+    status_logger.addHandler(queue_handler)
+    status_logger.propagate = False
 
     # Log initialization
     detail_logger.info(f"Logging initialized. Log file: {log_file}")
