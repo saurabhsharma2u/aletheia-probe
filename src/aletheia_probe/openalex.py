@@ -88,9 +88,7 @@ class OpenAlexClient:
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.session: aiohttp.ClientSession | None = None
 
-    def _with_auth_params(
-        self, params: dict[str, str | int]
-    ) -> dict[str, str | int]:
+    def _with_auth_params(self, params: dict[str, str | int]) -> dict[str, str | int]:
         """Return request params with OpenAlex authentication when configured."""
         if not self.api_key:
             return params
@@ -114,6 +112,8 @@ class OpenAlexClient:
 
     @async_retry_with_backoff(
         max_retries=3,
+        initial_delay=1.0,
+        max_delay=30.0,
         exceptions=(RateLimitError, aiohttp.ClientError, asyncio.TimeoutError),
     )
     async def get_source_by_issn(self, issn: str) -> dict[str, Any] | None:
@@ -238,6 +238,8 @@ class OpenAlexClient:
 
     @async_retry_with_backoff(
         max_retries=3,
+        initial_delay=1.0,
+        max_delay=30.0,
         exceptions=(RateLimitError, aiohttp.ClientError, asyncio.TimeoutError),
     )
     async def get_sources_by_name(
@@ -291,6 +293,8 @@ class OpenAlexClient:
 
     @async_retry_with_backoff(
         max_retries=3,
+        initial_delay=1.0,
+        max_delay=30.0,
         exceptions=(RateLimitError, aiohttp.ClientError, asyncio.TimeoutError),
     )
     async def get_source_by_name(
@@ -366,6 +370,8 @@ class OpenAlexClient:
 
     @async_retry_with_backoff(
         max_retries=3,
+        initial_delay=1.0,
+        max_delay=30.0,
         exceptions=(RateLimitError, aiohttp.ClientError, asyncio.TimeoutError),
     )
     async def get_works_count_by_year(
