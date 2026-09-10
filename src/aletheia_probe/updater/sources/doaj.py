@@ -20,13 +20,22 @@ detail_logger = get_detail_logger()
 status_logger = get_status_logger()
 
 
+# DOAJ has published the journal CSV under both word orderings over time:
+# the current export is named "doaj_journalcsv_<date>_<time>_utf8.csv", older
+# ones "journalcsv__doaj_<date>_<time>_utf8.csv". Accept either so a freshly
+# downloaded file works without being renamed.
+CSV_FILENAME_PATTERNS = (
+    "doaj_journalcsv_*.csv",
+    "journalcsv__doaj_*.csv",
+)
+
+
 class DOAJSource(DataSource):
     """Data source for DOAJ journal list (optional user-provided CSV file).
 
-    The user can download the CSV from https://doaj.org/docs/public-data-dump/
-    (choose the "CSV" export) and place it in .aletheia-probe/doaj/ in the
-    current working directory. The file should match the pattern
-    ``journalcsv__doaj_*.csv``.
+    The user can download the CSV from https://doaj.org/csv and place it in
+    .aletheia-probe/doaj/ in the current working directory. The file name
+    should match one of the patterns in :data:`CSV_FILENAME_PATTERNS`.
     """
 
     def __init__(self, data_dir: Path | None = None) -> None:
@@ -76,8 +85,9 @@ class DOAJSource(DataSource):
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        pattern = str(self.data_dir / "journalcsv__doaj_*.csv")
-        matching_files = glob.glob(pattern)
+        matching_files: list[str] = []
+        for pattern in CSV_FILENAME_PATTERNS:
+            matching_files.extend(glob.glob(str(self.data_dir / pattern)))
 
         if not matching_files:
             status_logger.info(
@@ -86,7 +96,8 @@ class DOAJSource(DataSource):
             detail_logger.info(
                 f"No DOAJ journal list found in {self.data_dir}. "
                 "To use DOAJ data locally, download the CSV from "
-                '"https://doaj.org/docs/public-data-dump/" and place it in this directory.'
+                '"https://doaj.org/csv" and place it in this directory. '
+                f"Accepted file names: {', '.join(CSV_FILENAME_PATTERNS)}."
             )
             return False
 
