@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Deduplicated cached backend source wiring (#1067)
   - Reduced inline imports in the cache/backend flow (#1065)
   - Removed legacy `QueryInput` normalization fields (#1049)
+- **Tooling and maintenance**:
+  - Raised the CI timing budgets that gate releases, which assumed fast upstream APIs: a single live assessment may now take 120s (was 60s) and the example scripts 300s (was 90s)
 - **Documentation**:
   - Documented the manually provided data sources (Scopus, DOAJ, DBLP) in a dedicated guide
   - Added future-integration assessments for NLM Catalog and ROR (#1037, #1039, #1041)

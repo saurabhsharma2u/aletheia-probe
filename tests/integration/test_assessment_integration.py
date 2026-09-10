@@ -63,10 +63,13 @@ class TestAssessmentIntegration:
             "Should have at least one backend result"
         )
 
-        # Processing time should be reasonable
+        # Processing time should be reasonable. The budget covers slow upstream
+        # APIs rather than the typical case: this queries every enabled backend
+        # live, and a run measured 65s when CrossRef and OpenAlex were slow.
+        # Matches the 120s allowed in test_bibtex_integration.py.
         assert result.processing_time > 0, "Processing time should be positive"
-        assert result.processing_time < 60, (
-            f"Processing should take < 60s, took: {result.processing_time}s"
+        assert result.processing_time < 120, (
+            f"Processing should take < 120s, took: {result.processing_time}s"
         )
 
     @pytest.mark.integration

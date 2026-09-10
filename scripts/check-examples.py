@@ -7,6 +7,13 @@ import sys
 from pathlib import Path
 
 
+# The examples run real assessments against CrossRef, OpenAlex and
+# OpenCitations. basic_assessment.py alone performs four sequential
+# assessments, and a single one has been measured at 65s when those APIs are
+# slow, so the budget has to cover the slow case rather than the typical one.
+EXAMPLE_TIMEOUT_SECONDS = 300
+
+
 def main() -> int:
     """Execute all example scripts and verify they run without errors."""
     # Find the project root (parent of scripts directory)
@@ -34,7 +41,7 @@ def main() -> int:
                 cwd=project_root,
                 capture_output=True,
                 text=True,
-                timeout=90,
+                timeout=EXAMPLE_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -48,7 +55,10 @@ def main() -> int:
 
         except subprocess.TimeoutExpired:
             failed_examples.append(example_file.name)
-            print(f"❌ TIMEOUT: {example_file.name} (exceeded 90 seconds)\n")
+            print(
+                f"❌ TIMEOUT: {example_file.name} "
+                f"(exceeded {EXAMPLE_TIMEOUT_SECONDS} seconds)\n"
+            )
         except Exception as e:
             failed_examples.append(example_file.name)
             print(f"❌ ERROR: {example_file.name}: {e}\n")
