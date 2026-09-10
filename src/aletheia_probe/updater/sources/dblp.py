@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.parse import urlparse
 
 from aiohttp import ClientSession, ClientTimeout
 from defusedxml import ElementTree as DefusedET
@@ -36,6 +38,25 @@ DEFAULT_SOCKET_READ_TIMEOUT_SECONDS = 900
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 30
 DEFAULT_PARSE_PROGRESS_STEP_BYTES = 100 * 1024 * 1024  # 100 MiB
 DEFAULT_PARSE_PROGRESS_STEP_RECORDS = 200_000
+
+GZIP_MAGIC_BYTES = b"\x1f\x8b"
+# The real dump is several hundred MiB; anything far below that is most likely
+# an error page or a truncated transfer rather than a usable dump.
+MIN_PLAUSIBLE_DUMP_BYTES = 50 * 1024 * 1024
+
+DBLP_BROWSE_URL = "https://dblp.org/xml/"
+# dblp.org and its official mirrors disallow automated access (robots.txt
+# "Disallow: /") and answer with a JavaScript anti-bot challenge page instead
+# of the dump, so from these hosts the file has to be fetched manually.
+HOSTS_REQUIRING_MANUAL_DOWNLOAD = frozenset(
+    {
+        "dblp.org",
+        "www.dblp.org",
+        "dblp.uni-trier.de",
+        "www.dblp.uni-trier.de",
+        "dblp.dagstuhl.de",
+    }
+)
 
 CONFERENCE_KEY_PREFIX = "conf/"
 JOURNAL_KEY_PREFIX = "journals/"
@@ -141,8 +162,22 @@ class DblpVenueSource(DataSource):
         )
         return journals
 
+    def _requires_manual_download(self) -> bool:
+        """Check whether the configured dump host forbids automated downloads."""
+        host = (urlparse(self.dump_url).hostname or "").lower()
+        return host in HOSTS_REQUIRING_MANUAL_DOWNLOAD
+
+    def _manual_download_hint(self) -> str:
+        """Build the instruction shown when no usable local dump is available."""
+        return (
+            f"Download dblp.xml.gz in a browser from {DBLP_BROWSE_URL} "
+            "(dblp.org does not permit automated downloads) and place it at "
+            f"{self.dump_path}, or set data_source_urls.dblp_xml_dump_url to a "
+            "mirror that serves the dump directly."
+        )
+
     async def _load_or_refresh_dump_data(self) -> list[dict[str, Any]]:
-        """Load venue data from local dump, refreshing only on missing/corrupt files."""
+        """Load venue data from the local dump, downloading only from a mirror."""
         if self.dump_path.exists():
             status_logger.info(
                 f"    {self.get_name()}: Using existing local dump {self.dump_path}"
@@ -157,12 +192,18 @@ class DblpVenueSource(DataSource):
                 EOFError,
                 gzip.BadGzipFile,
             ) as e:
-                status_logger.warning(
-                    "    "
-                    f"{self.get_name()}: Existing dump invalid ({e}); "
-                    "re-downloading"
-                )
                 detail_logger.exception("Failed to parse existing DBLP dump")
+                raise ValueError(
+                    f"Local DBLP dump {self.dump_path} is not a readable gzip XML "
+                    f"dump ({e}). Remove it and replace it with a fresh copy: "
+                    f"{self._manual_download_hint()}"
+                ) from e
+
+        if self._requires_manual_download():
+            raise FileNotFoundError(
+                f"No local DBLP dump at {self.dump_path}. "
+                f"{self._manual_download_hint()}"
+            )
 
         await self._download_dump()
         status_logger.info(f"    {self.get_name()}: Parsing local XML dump...")
@@ -193,6 +234,15 @@ class DblpVenueSource(DataSource):
                 async with session.get(self.dump_url) as response:
                     response.raise_for_status()
 
+                    content_type = (response.content_type or "").lower()
+                    if "html" in content_type:
+                        raise URLError(
+                            f"{self.dump_url} returned '{content_type}' instead of a "
+                            "gzip dump; the server answered with a web page, for "
+                            "example an anti-bot challenge. "
+                            f"{self._manual_download_hint()}"
+                        )
+
                     with open(tmp_path, "wb") as f:
                         async for chunk in response.content.iter_chunked(
                             DEFAULT_DOWNLOAD_CHUNK_SIZE
@@ -210,6 +260,7 @@ class DblpVenueSource(DataSource):
                                 )
                                 next_log_at += log_interval_bytes
 
+            self._validate_downloaded_dump(tmp_path, total_bytes)
             tmp_path.replace(self.dump_path)
             status_logger.info(
                 "    "
@@ -219,6 +270,39 @@ class DblpVenueSource(DataSource):
         finally:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
+
+    def _validate_downloaded_dump(self, tmp_path: Path, total_bytes: int) -> None:
+        """Verify a downloaded file is a gzip dump before it replaces the cache.
+
+        Args:
+            tmp_path: Partial download to inspect.
+            total_bytes: Number of bytes received.
+
+        Raises:
+            URLError: If the response is empty or is not gzip-compressed.
+        """
+        if total_bytes == 0:
+            raise URLError(
+                f"{self.dump_url} returned an empty response. "
+                f"{self._manual_download_hint()}"
+            )
+
+        with open(tmp_path, "rb") as f:
+            magic = f.read(len(GZIP_MAGIC_BYTES))
+
+        if magic != GZIP_MAGIC_BYTES:
+            raise URLError(
+                f"{self.dump_url} did not return a gzip file (response begins "
+                f"with {magic!r}). {self._manual_download_hint()}"
+            )
+
+        if total_bytes < MIN_PLAUSIBLE_DUMP_BYTES:
+            status_logger.warning(
+                "    "
+                f"{self.get_name()}: Downloaded dump is only "
+                f"{total_bytes / (1024 * 1024):,.0f} MiB, which is smaller than "
+                "expected for a full DBLP dump"
+            )
 
     def _parse_dump_file(self) -> list[dict[str, Any]]:
         """Parse local DBLP XML dump and build conference and journal entries."""
