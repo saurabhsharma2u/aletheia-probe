@@ -11,6 +11,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
+## [0.10.0] - 2026-09-10
+
+### Added
+
+- **Local/offline backend modes** — run against a local snapshot instead of a live API:
+  - Added DOAJ local mode backed by a user-provided CSV snapshot (#1094)
+  - Added `CROSSREF_MODE=local` support via `LocalCrossrefAdapter` (#1095)
+  - Added optional local OpenAlex backend via `OPENALEX_MODE=local` (#1071)
+  - Added optional OpenCitations adapter mode wiring (#1073)
+  - Added runtime mode display for local-capable backends in `status` (#1077, #1096) and in verbose journal output (#1097)
+- **New assessment backends**:
+  - Added PubMed NLM backend for biomedical journal legitimacy signal (#1072)
+  - Added OpenCitations analyzer backend and validators (#1044)
+  - Added OpenReview and Wikidata assessments (#1069)
+  - Added OpenAlex API key support
+- **Mass evaluation workflow**:
+  - Added `mass-eval` workflow with concurrent workers and a collect dedupe cache (#1078)
+  - Added 1:1 BibTeX entry to JSONL/CSV output via a state field (#1084)
+  - Added `condense_mass_eval_jsonl.py` script for CSV export (#1079)
+  - Added configurable assessment cache TTL for mass-eval (#1087)
+- **Venue normalization**:
+  - Added `lookup` command for venue normalization (#1045)
+  - Added normalization contract and dispatcher gating (#1047)
+  - Added strict lookup consistency checks (#1046)
+  - Enforced normalization-only backend inputs with strict conflict handling (#1048)
+- **Output**:
+  - Enriched `issn`/`eissn` in output from backend-discovered data (#1098)
+
+### Changed
+
+- **Performance**:
+  - Parallel file processing and faster BibTeX classification (#1093, #1100)
+  - Persistent SQLite connection per cache instance (#1088)
+  - In-process journal deduplication for assess mode (#1089)
+  - Venue normalized once per `_assess_with_retry` call instead of per retry (#1090)
+  - Throttled `_checkpoint_state` to avoid per-entry disk writes (#1086)
+- **Logging noise**:
+  - Removed high-frequency debug logs from pattern matching, SQLite connection utils, cache init and backend loading (#1074, #1082, #1083)
+  - Routed Kscien parse diagnostics to the detail logger (#1066)
+- **Internal structure**:
+  - Refactored the CLI into decoupled command and logic modules (#1064)
+  - Extracted the publication assessment workflow from the CLI (#1057, #1059, #1060)
+  - Deduplicated cached backend source wiring (#1067)
+  - Reduced inline imports in the cache/backend flow (#1065)
+  - Removed legacy `QueryInput` normalization fields (#1049)
+- **Documentation**:
+  - Documented the manually provided data sources (Scopus, DOAJ, DBLP) in a dedicated guide
+  - Added future-integration assessments for NLM Catalog and ROR (#1037, #1039, #1041)
+  - Reorganized media mentions (#1036, #1085)
+  - Documented local import rationale across runtime modules (#1061)
+  - Added missing public docstrings in backend/source APIs (#1068)
+  - Removed withdrawn JOSS submission materials (#1042)
+
+### Fixed
+
+- **Data source retrieval**:
+  - DOAJ journal list is now found under both of DOAJ's CSV export namings; the current `doaj_journalcsv_*.csv` was silently ignored
+  - DBLP no longer attempts a download from hosts that disallow automated access, and validates a downloaded dump before it replaces the local cache; previously an anti-bot challenge page was stored as `dblp.xml.gz`
+  - Fixed Kscien REST pagination sync
+  - Fixed OpenAlex query parameter encoding
+  - Venue queries are enriched with reliable OpenAlex ISSNs (#1043)
+- **Assessment correctness**:
+  - CrossRef coverage fractions are converted to percentage scale before comparison (#1081)
+  - Null publisher fields are normalized in cross-validation consistency checks (#1075)
+  - One-sided cross-validation is skipped and indicator reasoning cleaned (#1038)
+  - Each cross-validation pair is reported once instead of twice (#1109)
+  - `clear-cache` now also clears the OpenAlex cache (#1040)
+- **Stability**:
+  - Queued log records are flushed at exit and DEBUG detail logging restored (#1109)
+  - Fixed event-loop blocking and checkpoint corruption in mass_eval
+  - Backend instances are cached to prevent file-descriptor exhaustion under load (#1092)
+  - Patched pybtex `find_pos` to handle an empty name-parts list (#1091)
+  - All HTTP traffic is routed through the proxy when the environment variables are set (#1070)
+- **Output formatting**:
+  - Removed `record_id` from condensed CSV output (#1099)
+  - Floats are rounded to 4 decimal places in CSV output (#1080)
+
 ## [0.9.0] - 2026-02-15
 
 ### Added
