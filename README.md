@@ -261,22 +261,26 @@ Result: INSUFFICIENT_DATA (confidence: 0.45)
 Reasoning: "Not in major databases; pattern analysis suggests legitimate practices but low confidence"
 ```
 
-### Optional: Scopus Journal List
+### Optional: Manually Provided Data Sources
 
-To enhance coverage with Scopus data:
+Three backends read a file that you download yourself, because their providers
+offer no directly downloadable URL:
 
-1. Download the spreadsheet from [researchgate.net](https://www.researchgate.net/publication/384898389_Last_Update_of_Scopus_Indexed_Journal's_List_-_October_2024)
-2. Create directory: `mkdir -p .aletheia-probe/scopus`
-3. Place Excel file (e.g., `ext_list_October_2024.xlsx`) in this directory
-4. Run `aletheia-probe sync` to process the data
+| Backend | Adds |
+|---------|------|
+| `scopus` | ~30,000 indexed journals from major publishers |
+| `doaj` | ~23,000 vetted open-access journals |
+| `dblp_venues` | CS conference and journal venues for acronym expansion |
 
-**Benefits**: Adds nearly 30,000 subscription journals from major publishers (Elsevier, Springer, Wiley, etc.)
+See [Manually Provided Data Sources](docs/manual-data-sources.md) for download
+links and where to place each file so that `aletheia-probe sync` picks it up.
 
 ## Documentation
 
 ### User Documentation
 - [Quick Start Guide](docs/quick-start.md) - Installation and basic usage
 - [User Guide](docs/user-guide.md) - Comprehensive usage examples and features
+- [Manually Provided Data Sources](docs/manual-data-sources.md) - Scopus, DOAJ and DBLP files you download yourself
 - [Research Applications](docs/research-applications.md) - Using the tool in research workflows (SLR, bibliometrics, meta-research)
 - [Media Mentions](docs/media-mentions.md) - Curated external coverage and institutional references
 - [Configuration Reference](docs/configuration.md) - All configuration options

@@ -9,12 +9,13 @@ downloaded directly from DOAJ — no network calls, no rate limiting.
 
 ## Step 1 — Download the DOAJ CSV
 
-1. Go to <https://doaj.org/docs/public-data-dump/>
-2. Click **"Download journals CSV"**.  No login is required.
-3. The downloaded file will be named something like:
+1. Go to <https://doaj.org/csv> (linked from
+   <https://doaj.org/docs/public-data-dump/> as **"Download journals CSV"**).
+   No login is required.
+2. The downloaded file will be named something like:
 
    ```
-   journalcsv__doaj_20260314_1626_utf8.csv
+   doaj_journalcsv_20260810_2320_utf8.csv
    ```
 
 > **Note:** Use the CSV export (not the JSON bulk-download).
@@ -24,15 +25,17 @@ downloaded directly from DOAJ — no network calls, no rate limiting.
 ## Step 2 — Place the file
 
 Create the directory `.aletheia-probe/doaj/` **inside your working directory**
-(the directory from which you run `aletheia-probe`) and copy the file there:
+(the directory from which you run `aletheia-probe`) and copy the file there
+under its downloaded name:
 
 ```bash
 mkdir -p .aletheia-probe/doaj/
-cp ~/Downloads/journalcsv__doaj_*.csv .aletheia-probe/doaj/
+cp ~/Downloads/doaj_journalcsv_*.csv .aletheia-probe/doaj/
 ```
 
-If multiple files matching `journalcsv__doaj_*.csv` are present, the most
-recently modified one is used.
+Both of DOAJ's naming schemes are recognised — the current
+`doaj_journalcsv_*.csv` and the older `journalcsv__doaj_*.csv`. If multiple
+matching files are present, the most recently modified one is used.
 
 ---
 
